@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DeleteBounce — Email List Cleaner</title>
+<style>
+  :root{--bg:#0f1220;--card:#1a1f33;--fg:#e8ecff;--mut:#9aa3c7;--acc:#4f8cff;--live:#27c08a;--dead:#ff5d6c;--unk:#f0b429}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+  .wrap{max-width:720px;margin:0 auto;padding:32px 20px}
+  h1{margin:0 0 4px;font-size:28px}.sub{color:var(--mut);margin:0 0 24px}
+  .card{background:var(--card);border-radius:14px;padding:20px;margin-bottom:18px}
+  textarea{width:100%;height:180px;resize:vertical;background:#0c1020;color:var(--fg);border:1px solid #2a3252;border-radius:10px;padding:12px;font-family:ui-monospace,monospace;font-size:13px}
+  .row{display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap}
+  button{background:var(--acc);color:#fff;border:0;border-radius:10px;padding:11px 20px;font-size:15px;font-weight:600;cursor:pointer}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  input[type=file]{color:var(--mut);font-size:13px}
+  .bar{height:10px;background:#0c1020;border-radius:6px;overflow:hidden;margin:14px 0}
+  .bar>div{height:100%;width:0;background:var(--acc);transition:width .3s}
+  .stats{display:flex;gap:10px;flex-wrap:wrap}
+  .pill{flex:1;min-width:90px;text-align:center;background:#0c1020;border-radius:10px;padding:12px}
+  .pill b{display:block;font-size:22px}
+  .live b{color:var(--live)}.dead b{color:var(--dead)}.unk b{color:var(--unk)}
+  .dl{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}.dl button{background:#2a3252}
+  .muted{color:var(--mut);font-size:13px}.err{color:var(--dead);font-size:13px;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📭 DeleteBounce</h1>
+  <p class="sub">Bulk email verification — paste a list, get live / dead / unknown.</p>
+
+  <div class="card">
+    <textarea id="emails" placeholder="one email per line&#10;john@gmail.com&#10;jane@outlook.com"></textarea>
+    <div class="row">
+      <button id="go">Verify list</button>
+      <input type="file" id="file" accept=".txt,.csv" />
+      <span class="muted" id="hint">or upload a .txt / .csv</span>
+    </div>
+    <div class="err" id="err"></div>
+  </div>
+
+  <div class="card" id="progress" style="display:none">
+    <div class="muted" id="phase">Submitting…</div>
+    <div class="bar"><div id="fill"></div></div>
+    <div class="stats">
+      <div class="pill live"><b id="s-live">0</b>live</div>
+      <div class="pill dead"><b id="s-dead">0</b>dead</div>
+      <div class="pill unk"><b id="s-unk">0</b>unknown</div>
+      <div class="pill"><b id="s-prog">0/0</b>done</div>
+    </div>
+    <div class="dl" id="dl" style="display:none">
+      <button data-b="live">⬇ live.csv</button>
+      <button data-b="dead">⬇ dead.csv</button>
+      <button data-b="unknown">⬇ unknown.csv</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = 'https://kdyl3zxpydaunmmuislklxso2q0hnjwj.lambda-url.eu-south-1.on.aws';
+let jobId = null, timer = null;
+const $ = (id) => document.getElementById(id);
+
+$('file').onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  $('emails').value = await f.text();
+};
+
+$('go').onclick = async () => {
+  const text = $('emails').value.trim();
+  $('err').textContent = '';
+  if (!text) { $('err').textContent = 'Paste some emails first.'; return; }
+  $('go').disabled = true;
+  $('progress').style.display = 'block';
+  $('dl').style.display = 'none';
+  $('phase').textContent = 'Submitting…';
+  try {
+    const r = await fetch(API + '/enqueue', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ text }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'enqueue failed');
+    jobId = d.jobId;
+    $('phase').textContent = 'Verifying ' + d.count + ' emails…';
+    poll();
+    timer = setInterval(poll, 2500);
+  } catch (e) { $('err').textContent = e.message; $('go').disabled = false; }
+};
+
+async function poll() {
+  if (!jobId) return;
+  try {
+    const r = await fetch(API + '/status?jobId=' + encodeURIComponent(jobId));
+    const d = await r.json();
+    if (!r.ok) return;
+    $('s-live').textContent = d.live; $('s-dead').textContent = d.dead; $('s-unk').textContent = d.unknown;
+    $('s-prog').textContent = d.processed + '/' + d.total;
+    $('fill').style.width = (d.total ? (d.processed / d.total * 100) : 0) + '%';
+    if (d.total > 0 && d.processed >= d.total) {
+      clearInterval(timer);
+      $('phase').textContent = '✅ Done — ' + d.total + ' verified';
+      $('dl').style.display = 'flex';
+      $('go').disabled = false;
+    }
+  } catch (e) {}
+}
+
+document.querySelectorAll('.dl button').forEach((b) => {
+  b.onclick = async () => {
+    const r = await fetch(API + '/download?jobId=' + encodeURIComponent(jobId) + '&bucket=' + b.dataset.b);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = b.dataset.b + '.csv'; a.click();
+    URL.revokeObjectURL(a.href);
+  };
+});
+</script>
+</body>
+</html>
